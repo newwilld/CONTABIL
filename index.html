@@ -173,6 +173,14 @@
       box-shadow:var(--shadow);font-size:14px
     }
     .toast.show{opacity:1}
+    .sync-status{
+      display:inline-flex;align-items:center;gap:6px;
+      font-size:11px;font-weight:700;padding:4px 8px;border-radius:999px;
+      background:rgba(255,255,255,.15);color:#fff;white-space:nowrap
+    }
+    .sync-dot{width:7px;height:7px;border-radius:50%;background:#ffd54f}
+    .sync-status.online .sync-dot{background:#7CFF8B}
+    .sync-status.offline .sync-dot{background:#ff8a80}
     .search-wrap{display:none;padding:0 12px 12px}
     .search-wrap.open{display:block}
     .search-wrap input{border:0;border-radius:7px;padding:11px}
@@ -195,6 +203,7 @@
 <div class="app">
   <header class="topbar">
     <div class="status">
+      <span class="sync-status" id="syncStatus"><span class="sync-dot"></span><span id="syncText">Conectando...</span></span>
       <span class="status-dot"></span><span id="clock">--:--</span>
     </div>
     <div class="toolbar">
@@ -353,9 +362,45 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- Firebase: App + Realtime Database (compat para funcionar em um único HTML) -->
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 <script>
 (() => {
   const STORAGE_KEY = 'contabilidade_basica_v1';
+
+  // Firebase Realtime Database
+  // IMPORTANTE: se o seu Realtime Database estiver em outra região/URL,
+  // troque somente o campo databaseURL abaixo pela URL exibida no Firebase Console.
+  const firebaseConfig = {
+    apiKey: "AIzaSyChSVQKAHxpSxzeKxkx5NKtf9JMYzoFNhY",
+    authDomain: "contabil-d6ce1.firebaseapp.com",
+    projectId: "contabil-d6ce1",
+    storageBucket: "contabil-d6ce1.firebasestorage.app",
+    messagingSenderId: "154015033956",
+    appId: "1:154015033956:web:0019dc71b010e81cc94d71",
+    measurementId: "G-L1BYXZ6JBR",
+    databaseURL: "https://contabil-d6ce1-default-rtdb.firebaseio.com"
+  };
+
+  let firebaseReady = false;
+  let remoteLoaded = false;
+  let firebaseDb = null;
+  let rootRef = null;
+  let txRef = null;
+  let favRef = null;
+
+  try{
+    if(!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    firebaseDb = firebase.database();
+    rootRef = firebaseDb.ref('contabilidade');
+    txRef = rootRef.child('transactions');
+    favRef = rootRef.child('favorites');
+    firebaseReady = true;
+  }catch(err){
+    console.error('Erro ao iniciar Firebase:', err);
+  }
+
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -390,6 +435,126 @@
 
   function saveState(){
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  function setSyncStatus(mode, text){
+    const el = $('#syncStatus');
+    const label = $('#syncText');
+    if(!el || !label) return;
+    el.classList.remove('online','offline');
+    if(mode) el.classList.add(mode);
+    label.textContent = text;
+  }
+
+  function firebaseSafeObject(obj){
+    // Remove valores undefined, que o Firebase não aceita.
+    return JSON.parse(JSON.stringify(obj));
+  }
+
+  async function remoteSetTransaction(item){
+    saveState(); // cache local imediato
+    if(!firebaseReady || !txRef) return;
+    try{
+      await txRef.child(item.id).set(firebaseSafeObject(item));
+    }catch(err){
+      console.error('Erro ao salvar no Firebase:', err);
+      setSyncStatus('offline','Erro ao sincronizar');
+      toast('Salvo localmente. Firebase não respondeu.');
+    }
+  }
+
+  async function remoteDeleteTransaction(id){
+    saveState();
+    if(!firebaseReady || !txRef) return;
+    try{
+      await txRef.child(id).remove();
+    }catch(err){
+      console.error('Erro ao excluir no Firebase:', err);
+      setSyncStatus('offline','Erro ao sincronizar');
+      toast('Excluído localmente. Firebase não respondeu.');
+    }
+  }
+
+  async function remoteSetFavorites(){
+    saveState();
+    if(!firebaseReady || !favRef) return;
+    try{
+      await favRef.set(firebaseSafeObject(state.favorites));
+    }catch(err){
+      console.error('Erro ao salvar favoritos:', err);
+    }
+  }
+
+  async function remoteReplaceAll(nextState){
+    state = nextState;
+    saveState();
+    renderAll();
+    if(!firebaseReady || !rootRef) return;
+    try{
+      const txMap = {};
+      for(const t of state.transactions) txMap[t.id] = firebaseSafeObject(t);
+      await rootRef.set({
+        transactions: txMap,
+        favorites: firebaseSafeObject(state.favorites)
+      });
+    }catch(err){
+      console.error('Erro ao importar dados no Firebase:', err);
+      setSyncStatus('offline','Erro ao sincronizar');
+      throw err;
+    }
+  }
+
+  function startRealtimeSync(){
+    if(!firebaseReady || !rootRef){
+      setSyncStatus('offline','Somente local');
+      return;
+    }
+
+    // Estado de conexão nativo do Realtime Database.
+    firebaseDb.ref('.info/connected').on('value', snap => {
+      const connected = snap.val() === true;
+      setSyncStatus(connected ? 'online' : 'offline', connected ? 'Firebase online' : 'Offline');
+    });
+
+    rootRef.on('value', snap => {
+      const data = snap.val();
+
+      // Primeiro acesso: se o banco estiver vazio e houver dados locais,
+      // envia o cache local para não perder lançamentos já existentes.
+      if(!remoteLoaded){
+        remoteLoaded = true;
+        if(!data && state.transactions.length){
+          const txMap = {};
+          for(const t of state.transactions) txMap[t.id] = firebaseSafeObject(t);
+          rootRef.set({
+            transactions: txMap,
+            favorites: firebaseSafeObject(state.favorites)
+          }).catch(err => console.error('Erro ao migrar cache local:', err));
+          return;
+        }
+      }
+
+      if(!data){
+        state = structuredClone(initialState);
+      }else{
+        const rawTx = data.transactions || {};
+        const transactions = Array.isArray(rawTx)
+          ? rawTx.filter(Boolean)
+          : Object.keys(rawTx).map(id => ({...rawTx[id], id: rawTx[id]?.id || id}));
+
+        state = {
+          transactions,
+          favorites: {...initialState.favorites, ...(data.favorites || {})}
+        };
+      }
+
+      saveState();
+      renderAll();
+    }, err => {
+      console.error('Realtime listener error:', err);
+      setSyncStatus('offline','Sem permissão');
+      toast('Firebase bloqueou o acesso. Verifique as regras do Realtime Database.');
+    });
   }
 
   function money(v){
@@ -463,7 +628,8 @@
     $$('[data-fav]').forEach(btn => btn.addEventListener('click', () => {
       const id = btn.dataset.fav;
       state.favorites[id] = !state.favorites[id];
-      saveState(); renderSummary();
+      remoteSetFavorites();
+      renderSummary();
     }));
 
     $$('[data-card]').forEach(btn => btn.addEventListener('click', () => {
@@ -648,7 +814,8 @@
     if(!t) return;
     if(confirm(`Excluir "${t.description}"?`)){
       state.transactions = state.transactions.filter(x=>x.id!==id);
-      saveState(); renderAll(); toast('Lançamento excluído.');
+      remoteDeleteTransaction(id);
+      renderAll(); toast('Lançamento excluído.');
     }
   }
 
@@ -674,16 +841,17 @@
     };
     if(!item.description || !item.date || !item.time) return;
 
+    const wasEditing = !!editingId;
     if(editingId){
       const index = state.transactions.findIndex(x=>x.id===editingId);
       if(index >= 0) state.transactions[index] = item;
     }else{
       state.transactions.push(item);
     }
-    saveState();
+    remoteSetTransaction(item);
     closeModal();
     renderAll();
-    toast(editingId ? 'Lançamento atualizado.' : 'Lançamento registrado.');
+    toast(wasEditing ? 'Lançamento atualizado.' : 'Lançamento registrado.');
   }
 
   function activateTab(id){
@@ -815,10 +983,8 @@
         return;
       }
 
-      state = nextState;
-      saveState();
-      renderAll();
-      toast('Backup JSON importado com sucesso.');
+      await remoteReplaceAll(nextState);
+      toast('Backup JSON importado e sincronizado com o Firebase.');
     }catch(err){
       console.error(err);
       alert('Não foi possível importar este arquivo. Selecione um JSON exportado por este aplicativo.');
@@ -832,6 +998,15 @@
       state = structuredClone(initialState);
       saveState();
       renderAll();
+      if(firebaseReady && rootRef){
+        rootRef.set({
+          transactions: null,
+          favorites: firebaseSafeObject(state.favorites)
+        }).catch(err => {
+          console.error(err);
+          toast('Dados locais apagados, mas houve erro no Firebase.');
+        });
+      }
       toast('Dados apagados.');
     }
   });
@@ -845,6 +1020,7 @@
   setType('entrada');
   renderAll();
   updateClock();
+  startRealtimeSync();
   setInterval(updateClock, 30000);
 })();
 </script>
