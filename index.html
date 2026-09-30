@@ -87,7 +87,7 @@
     }
     .section-title{font-size:14px;text-transform:uppercase;letter-spacing:.6px;color:#62676b;font-weight:700;margin:14px 4px 8px}
     .quick{
-      display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px
+      display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:10px
     }
     .quick button{
       border:0;border-radius:9px;padding:13px 10px;color:#fff;font-weight:700;box-shadow:var(--shadow)
@@ -279,8 +279,10 @@
         <div class="section-title" style="margin-top:2px">Dados</div>
         <div class="quick">
           <button class="btn-income" id="exportBtn">Exportar JSON</button>
+          <button class="btn-main" id="importBtn" type="button">Importar JSON</button>
           <button class="btn-expense" id="resetBtn">Apagar tudo</button>
         </div>
+        <input type="file" id="importFile" accept=".json,application/json" hidden>
       </div>
     </section>
   </main>
@@ -763,6 +765,66 @@
     a.download = `contabilidade-backup-${new Date().toISOString().slice(0,10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
+  });
+
+  $('#importBtn').addEventListener('click',()=>{
+    $('#importFile').value = '';
+    $('#importFile').click();
+  });
+
+  $('#importFile').addEventListener('change', async (event)=>{
+    const file = event.target.files && event.target.files[0];
+    if(!file) return;
+
+    try{
+      const text = await file.text();
+      const imported = JSON.parse(text);
+
+      if(!imported || !Array.isArray(imported.transactions)){
+        throw new Error('Formato inválido');
+      }
+
+      const normalizedTransactions = imported.transactions.map((t, index) => {
+        if(!t || typeof t !== 'object') throw new Error('Lançamento inválido');
+        if(!['entrada','saida'].includes(t.type)) throw new Error('Tipo inválido');
+        if(!['empresa','pessoal'].includes(t.account)) throw new Error('Conta inválida');
+
+        const value = Number(t.value);
+        if(!Number.isFinite(value) || value < 0) throw new Error('Valor inválido');
+
+        return {
+          id: String(t.id || uid() + index),
+          type: t.type,
+          account: t.account,
+          category: String(t.category || 'outro'),
+          value,
+          description: String(t.description || 'Sem descrição').slice(0,90),
+          date: String(t.date || '').slice(0,10),
+          time: String(t.time || '00:00').slice(0,5),
+          note: String(t.note || '').slice(0,240),
+          createdAt: Number(t.createdAt || Date.now())
+        };
+      });
+
+      const nextState = {
+        transactions: normalizedTransactions,
+        favorites: {...initialState.favorites, ...(imported.favorites || {})}
+      };
+
+      if(!confirm(`Importar ${normalizedTransactions.length} lançamento(s)? Isso substituirá os dados atuais salvos neste navegador.`)){
+        return;
+      }
+
+      state = nextState;
+      saveState();
+      renderAll();
+      toast('Backup JSON importado com sucesso.');
+    }catch(err){
+      console.error(err);
+      alert('Não foi possível importar este arquivo. Selecione um JSON exportado por este aplicativo.');
+    }finally{
+      event.target.value = '';
+    }
   });
 
   $('#resetBtn').addEventListener('click',()=>{
